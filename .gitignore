@@ -1,0 +1,20 @@
+# Personal config with real credentials and local paths
+config.json
+.env
+
+# Sync state contains real file paths and photo metadata
+sync_state.json
+
+# Logs contain real operational data
+logs/
+
+# Claude settings
+.claude/
+CLAUDE.md
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

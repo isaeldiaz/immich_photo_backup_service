@@ -1,0 +1,41 @@
+{
+  "immich": {
+    "data_dir": "/path/to/immich/upload",
+    "backup_source": "native",
+    "backup_dir": "/path/to/immich/upload/backups",
+    "api_url": "http://localhost:2283",
+    "api_key": "YOUR_IMMICH_API_KEY",
+    "docker_path_mappings": {
+      "/mnt/media/photos": "/path/to/your/external/library",
+      "/usr/src/app/upload/upload": "/path/to/immich/upload/upload"
+    }
+  },
+  "external_library": {
+    "base_dir": "/path/to/your/external/library",
+    "photos_subdir": "/path/to/your/external/library/immich",
+    "duplicates_subdir": "/path/to/your/external/library/immich/duplicates",
+    "metadata_subdir": "/path/to/your/external/library/immich/metadata"
+  },
+  "sync": {
+    "hash_algorithm": "sha256",
+    "hash_length": 12,
+    "verify_copies": true,
+    "archive_originals": true
+  },
+  "archive": {
+    "retention_days": 7,
+    "archive_subdir": "archived",
+    "cleanup_empty_dirs": true
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/immich_backup.log",
+    "max_size": "10MB",
+    "backup_count": 5
+  },
+  "features": {
+    "exif_date_extraction": true,
+    "filename_date_extraction": true,
+    "folder_date_extraction": true
+  }
+}
