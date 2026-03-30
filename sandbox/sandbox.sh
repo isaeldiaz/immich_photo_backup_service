@@ -118,12 +118,10 @@ cmd_stop() {
 cmd_reset() {
     echo "==> Stopping sandbox..."
     _compose down 2>/dev/null || true
-    echo "==> Removing sandbox data directories..."
-    rm -rf \
-        "${SCRIPT_DIR}/immich_upload" \
-        "${SCRIPT_DIR}/nas_library" \
-        "${SCRIPT_DIR}/logs" \
-        "${SCRIPT_DIR}/pgdata" \
+    echo "==> Removing sandbox data directories (using container for root-owned files)..."
+    docker run --rm -v "${SCRIPT_DIR}:/sandbox" alpine \
+        sh -c "rm -rf /sandbox/pgdata /sandbox/immich_upload /sandbox/nas_library /sandbox/logs"
+    rm -f \
         "${SCRIPT_DIR}/sync_state.sandbox.json" \
         "${SCRIPT_DIR}/.sandbox_api_key" \
         "${SCRIPT_DIR}/config.sandbox.json"
