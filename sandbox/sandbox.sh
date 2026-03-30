@@ -188,7 +188,7 @@ cmd_get_key() {
         "${SANDBOX_BASE_URL}/api/api-keys" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${access_token}" \
-        -d '{"name":"sandbox-key"}')
+        -d '{"name":"sandbox-key","permissions":["all"]}')
     local api_key
     api_key=$(echo "${key_result}" | python3 -c "import json,sys; print(json.load(sys.stdin)['secret'])")
 
