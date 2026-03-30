@@ -12,6 +12,16 @@ logs/
 .claude/
 CLAUDE.md
 
+# Sandbox data (bind-mount dirs, state, credentials — these are machine-specific or contain secrets)
+sandbox/immich_upload/
+sandbox/nas_library/
+sandbox/pgdata/
+sandbox/logs/
+sandbox/sync_state.sandbox.json
+sandbox/.sandbox_api_key
+sandbox/.env.sandbox
+sandbox/config.sandbox.json
+
 # Python cache
 __pycache__/
 **/__pycache__/

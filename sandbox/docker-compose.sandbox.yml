@@ -1,0 +1,58 @@
+name: immich-sandbox
+
+networks:
+  immich-sandbox-network:
+    driver: bridge
+
+services:
+  immich-server:
+    container_name: sandbox_immich_server
+    image: ghcr.io/immich-app/immich-server:release
+    networks:
+      - immich-sandbox-network
+    environment:
+      DB_HOSTNAME: database
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE_NAME: immich
+      REDIS_HOSTNAME: redis
+      IMMICH_MACHINE_LEARNING_ENABLED: "false"
+      IMMICH_HOST: 0.0.0.0
+      IMMICH_PORT: "3001"
+      IMMICH_IGNORE_MOUNT_CHECK_ERRORS: "true"
+    volumes:
+      - ./immich_upload:/usr/src/app/upload
+      - ./nas_library:/mnt/media/photos
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "2284:3001"
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    container_name: sandbox_immich_redis
+    image: redis:6.2-alpine
+    networks:
+      - immich-sandbox-network
+    restart: unless-stopped
+
+  database:
+    container_name: sandbox_immich_postgres
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.3.0
+    command: -c fsync=off -c shared_preload_libraries=vchord.so
+    networks:
+      - immich-sandbox-network
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: immich
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d immich"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped

@@ -1,0 +1,35 @@
+{
+  "immich": {
+    "api_url": "http://localhost:2284",
+    "api_key": "PLACEHOLDER_injected_by_sandbox_sh_run",
+    "docker_path_mappings": {
+      "/usr/src/app/upload/upload": "__SANDBOX_DIR__/immich_upload/upload",
+      "/mnt/media/photos": "__SANDBOX_DIR__/nas_library"
+    }
+  },
+  "external_library": {
+    "base_dir": "__SANDBOX_DIR__/nas_library"
+  },
+  "sync": {
+    "hash_algorithm": "sha256",
+    "hash_length": 12,
+    "verify_copies": true,
+    "archive_originals": true
+  },
+  "archive": {
+    "retention_days": 7,
+    "archive_subdir": "archived",
+    "cleanup_empty_dirs": true
+  },
+  "logging": {
+    "level": "DEBUG",
+    "file": "__SANDBOX_DIR__/logs/immich_backup.log",
+    "max_size": "10MB",
+    "backup_count": 5
+  },
+  "features": {
+    "exif_date_extraction": true,
+    "filename_date_extraction": true,
+    "folder_date_extraction": true
+  }
+}

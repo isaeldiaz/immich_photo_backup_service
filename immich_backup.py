@@ -30,14 +30,15 @@ from lib.archiver import Archiver
 # State management
 # ------------------------------------------------------------------
 
-STATE_FILE = Path(__file__).parent / "sync_state.json"
+DEFAULT_STATE_FILE = Path(__file__).parent / "sync_state.json"
 
 
-def load_state() -> dict:
+def load_state(path: Path = None) -> dict:
     """Load sync state from disk, returning defaults if missing or corrupt."""
-    if STATE_FILE.exists():
+    target = path if path is not None else DEFAULT_STATE_FILE
+    if target.exists():
         try:
-            with open(STATE_FILE, "r") as f:
+            with open(target, "r") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -48,9 +49,10 @@ def load_state() -> dict:
     }
 
 
-def save_state(state: dict) -> None:
+def save_state(state: dict, path: Path = None) -> None:
     """Persist sync state to disk."""
-    with open(STATE_FILE, "w") as f:
+    target = path if path is not None else DEFAULT_STATE_FILE
+    with open(target, "w") as f:
         json.dump(state, f, indent=2)
 
 
@@ -78,7 +80,7 @@ def map_container_path(container_path: str, mappings: dict) -> Path:
 # Commands
 # ------------------------------------------------------------------
 
-def cmd_sync(config: Config, dry_run: bool = False, force_resync: bool = False) -> bool:
+def cmd_sync(config: Config, dry_run: bool = False, force_resync: bool = False, state_file: Path = None) -> bool:
     """Main sync workflow: list unarchived -> hash -> copy to NAS -> archive."""
     logger = get_logger("immich_backup")
     logger.info("Starting sync operation (dry_run=%s, force_resync=%s)", dry_run, force_resync)
@@ -132,7 +134,7 @@ def cmd_sync(config: Config, dry_run: bool = False, force_resync: bool = False) 
         return user_cache[owner_id]
 
     # 4. Load state
-    state = load_state()
+    state = load_state(state_file)
     synced_files = state.get("synced_files", {})
 
     stats = {
@@ -230,7 +232,7 @@ def cmd_sync(config: Config, dry_run: bool = False, force_resync: bool = False) 
         state["synced_files"] = synced_files
         state["total_synced"] = len(synced_files)
         state["last_sync_time"] = datetime.now().isoformat()
-        save_state(state)
+        save_state(state, state_file)
 
     # Summary
     logger.info("--- Sync Summary ---")
@@ -247,7 +249,7 @@ def cmd_sync(config: Config, dry_run: bool = False, force_resync: bool = False) 
     return stats["errors"] == 0
 
 
-def cmd_status(config: Config) -> bool:
+def cmd_status(config: Config, state_file: Path = None) -> bool:
     """Show configuration, last sync time, and statistics."""
     logger = get_logger("immich_backup")
 
@@ -258,7 +260,7 @@ def cmd_status(config: Config) -> bool:
     logger.info("NAS base dir:     %s", config.get("external_library.base_dir"))
 
     # Last sync
-    state = load_state()
+    state = load_state(state_file)
     last_sync = state.get("last_sync_time")
     logger.info("Last sync:        %s", last_sync if last_sync else "Never")
     logger.info("Total synced:     %d", state.get("total_synced", 0))
@@ -405,6 +407,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Immich Backup System - sync photos to NAS and archive in Immich",
     )
     parser.add_argument("--config", default="config.json", help="Configuration file path")
+    parser.add_argument("--state-file", default=None, metavar="PATH",
+        help="Sync state JSON file (default: sync_state.json next to this script)")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done without making changes")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
@@ -455,13 +459,14 @@ def main() -> int:
 
     # Resolve --dry-run from either the top-level or subcommand flag
     dry_run = args.dry_run
+    state_file = Path(args.state_file) if args.state_file else None
 
     try:
         if args.command == "sync":
             force_resync = getattr(args, "force_resync", False)
-            success = cmd_sync(config, dry_run=dry_run, force_resync=force_resync)
+            success = cmd_sync(config, dry_run=dry_run, force_resync=force_resync, state_file=state_file)
         elif args.command == "status":
-            success = cmd_status(config)
+            success = cmd_status(config, state_file=state_file)
         elif args.command == "organize":
             success = cmd_organize(
                 config,
