@@ -114,7 +114,15 @@ def cmd_sync(config: Config, dry_run: bool = False, force_resync: bool = False, 
         logger.info("No unarchived assets found. Nothing to do.")
         return True
 
-    logger.info("Found %d unarchived assets", len(assets))
+    # Only process upload library assets (libraryId is None).
+    # External library assets are already on the NAS — syncing them would
+    # archive the external library record, removing it from the timeline.
+    upload_assets = [a for a in assets if a.get("libraryId") is None]
+    logger.info(
+        "Found %d unarchived assets (%d upload library, %d external library skipped)",
+        len(assets), len(upload_assets), len(assets) - len(upload_assets),
+    )
+    assets = upload_assets
 
     # 2. Build hash index of existing NAS files
     logger.info("Building hash index of NAS library...")
