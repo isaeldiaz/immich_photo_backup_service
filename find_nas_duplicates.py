@@ -151,6 +151,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.source is None:
+        parser.error("SOURCE_DIR is required")
+    if args.dest is None:
+        parser.error("--dest is required")
+
     source_dir = Path(args.source).resolve()
     dest_dir = Path(args.dest).resolve()
 

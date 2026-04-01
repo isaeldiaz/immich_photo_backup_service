@@ -132,6 +132,16 @@ cmd_logs() {
     _compose logs -f immich-server
 }
 
+cmd_ls_upload() {
+    echo "=== Immich upload library (original files) ==="
+    docker exec sandbox_immich_server find /usr/src/app/upload/upload -type f | sort
+}
+
+cmd_ls_nas() {
+    echo "=== NAS external library (synced files) ==="
+    find "${SCRIPT_DIR}/nas_library" -type f | sort
+}
+
 cmd_status() {
     echo "=== Sandbox Docker Status ==="
     _compose ps
@@ -234,15 +244,17 @@ json.dump(cfg, open('${tmp_config}', 'w'), indent=2)
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
-    start)   cmd_start ;;
-    stop)    cmd_stop ;;
-    reset)   cmd_reset ;;
-    logs)    cmd_logs ;;
-    status)  cmd_status ;;
-    get-key) cmd_get_key ;;
-    run)     shift; cmd_run "$@" ;;
+    start)     cmd_start ;;
+    stop)      cmd_stop ;;
+    reset)     cmd_reset ;;
+    logs)      cmd_logs ;;
+    status)    cmd_status ;;
+    get-key)   cmd_get_key ;;
+    run)       shift; cmd_run "$@" ;;
+    ls-upload) cmd_ls_upload ;;
+    ls-nas)    cmd_ls_nas ;;
     *)
-        echo "Usage: sandbox.sh {start|stop|reset|logs|status|get-key|run} [args...]"
+        echo "Usage: sandbox.sh {start|stop|reset|logs|status|get-key|run|ls-upload|ls-nas} [args...]"
         exit 1
         ;;
 esac
