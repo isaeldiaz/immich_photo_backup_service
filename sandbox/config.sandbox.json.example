@@ -1,7 +1,7 @@
 {
   "immich": {
     "api_url": "http://localhost:2284",
-    "api_key": "PLACEHOLDER_injected_by_sandbox_sh_run",
+    "api_keys": ["PLACEHOLDER_injected_by_sandbox_sh_run"],
     "docker_path_mappings": {
       "/usr/src/app/upload/upload": "__SANDBOX_DIR__/immich_upload/upload",
       "/mnt/media/photos": "__SANDBOX_DIR__/nas_library"

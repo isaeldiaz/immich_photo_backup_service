@@ -85,155 +85,173 @@ def cmd_sync(config: Config, dry_run: bool = False, force_resync: bool = False, 
     logger = get_logger("immich_backup")
     logger.info("Starting sync operation (dry_run=%s, force_resync=%s)", dry_run, force_resync)
 
-    # Build components
-    api = ImmichAPI(
-        base_url=config.get("immich.api_url"),
-        api_key=config.get("immich.api_key"),
-    )
+    base_url = config.get("immich.api_url")
+    docker_mappings = config.get("immich.docker_path_mappings", {})
+    target_base_dir = Path(config.get("external_library.base_dir"))
+
+    # Support both api_keys (list) and legacy api_key (single string)
+    api_keys: list[str] = config.get("immich.api_keys") or []
+    if not api_keys:
+        single_key = config.get("immich.api_key")
+        if single_key:
+            api_keys = [single_key]
+    if not api_keys:
+        logger.error("No API keys configured. Set 'immich.api_keys' in config.")
+        return False
+
+    # Build shared components
     hasher = FileHasher(
         hash_algorithm=config.get("sync.hash_algorithm", "sha256"),
         hash_length=config.get("sync.hash_length", 12),
     )
-    target_base_dir = Path(config.get("external_library.base_dir"))
     organizer = FileOrganizer(
         hasher=hasher,
         target_base_dir=target_base_dir,
         verify_copies=config.get("sync.verify_copies", True),
     )
-    archiver = Archiver(api=api)
-    docker_mappings = config.get("immich.docker_path_mappings", {})
 
-    # 1. Fetch unarchived assets
-    logger.info("Fetching unarchived assets from Immich API...")
-    if not api.ping():
-        logger.error("Cannot reach Immich server at %s", config.get("immich.api_url"))
+    # 1. Reachability check
+    if not ImmichAPI(base_url=base_url, api_key=api_keys[0]).ping():
+        logger.error("Cannot reach Immich server at %s", base_url)
         return False
 
-    assets = api.get_all_unarchived_assets()
-    if not assets:
-        logger.info("No unarchived assets found. Nothing to do.")
-        return True
-
-    # Only process upload library assets (libraryId is None).
-    # External library assets are already on the NAS — syncing them would
-    # archive the external library record, removing it from the timeline.
-    upload_assets = [a for a in assets if a.get("libraryId") is None]
-    logger.info(
-        "Found %d unarchived assets (%d upload library, %d external library skipped)",
-        len(assets), len(upload_assets), len(assets) - len(upload_assets),
-    )
-    assets = upload_assets
-
-    # 2. Build hash index of existing NAS files
+    # 2. Build hash index of existing NAS files once (shared across all users)
     logger.info("Building hash index of NAS library...")
     hasher.build_hash_index(target_base_dir)
 
-    # 3. User lookup cache
-    user_cache: dict[str, str] = {}  # ownerId -> user name
-
-    def get_user_name(owner_id: str) -> str:
-        if owner_id not in user_cache:
-            try:
-                user = api.get_user(owner_id)
-                user_cache[owner_id] = user.get("name", owner_id)
-            except Exception as exc:
-                logger.warning("Could not look up user %s: %s", owner_id, exc)
-                user_cache[owner_id] = owner_id
-        return user_cache[owner_id]
-
-    # 4. Load state
+    # 3. Load state
     state = load_state(state_file)
     synced_files = state.get("synced_files", {})
 
     stats = {
-        "total_assets": len(assets),
+        "total_assets": 0,
         "new_files": 0,
         "duplicates": 0,
         "skipped": 0,
         "errors": 0,
+        "archived": 0,
     }
-    ids_to_archive: list[str] = []
 
-    for i, asset in enumerate(assets, 1):
-        asset_id = asset.get("id")
-        original_path = asset.get("originalPath", "")
+    logger.info("Syncing %d user(s)...", len(api_keys))
 
-        # Skip already-synced unless forced
-        if not force_resync and asset_id in synced_files:
-            stats["skipped"] += 1
+    for api_key in api_keys:
+        api = ImmichAPI(base_url=base_url, api_key=api_key)
+        archiver = Archiver(api=api)
+
+        # 4. Fetch unarchived assets for this user
+        logger.info("Fetching unarchived assets...")
+        assets = api.get_all_unarchived_assets()
+
+        # Only process upload library assets (libraryId is None).
+        # External library assets are already on the NAS — syncing them would
+        # archive the external library record, removing it from the timeline.
+        upload_assets = [a for a in assets if a.get("libraryId") is None]
+        logger.info(
+            "Found %d unarchived assets (%d upload library, %d external library skipped)",
+            len(assets), len(upload_assets), len(assets) - len(upload_assets),
+        )
+        assets = upload_assets
+        stats["total_assets"] += len(assets)
+
+        if not assets:
+            logger.info("No unarchived assets for this user. Skipping.")
             continue
 
-        # 4a. Map container path to host path
-        host_path = map_container_path(original_path, docker_mappings)
-        if host_path is None:
-            logger.warning(
-                "[%d/%d] No path mapping for container path: %s",
-                i, stats["total_assets"], original_path,
-            )
-            stats["errors"] += 1
-            continue
+        # User lookup cache (per API key, scoped to this user's session)
+        user_cache: dict[str, str] = {}
 
-        # 4b. Verify file exists on disk
-        if not host_path.exists():
-            logger.warning(
-                "[%d/%d] File not found on disk: %s (mapped from %s)",
-                i, stats["total_assets"], host_path, original_path,
-            )
-            stats["errors"] += 1
-            continue
+        def get_user_name(owner_id: str, _api: ImmichAPI = api) -> str:
+            if owner_id not in user_cache:
+                try:
+                    user = _api.get_user(owner_id)
+                    user_cache[owner_id] = user.get("name", owner_id)
+                except Exception as exc:
+                    logger.warning("Could not look up user %s: %s", owner_id, exc)
+                    user_cache[owner_id] = owner_id
+            return user_cache[owner_id]
 
-        # 4c. Get user name
-        owner_id = asset.get("ownerId", "unknown")
-        user_name = get_user_name(owner_id)
+        ids_to_archive: list[str] = []
 
-        # 4d. Organize file
-        exif_date = asset.get("fileCreatedAt")
+        for i, asset in enumerate(assets, 1):
+            asset_id = asset.get("id")
+            original_path = asset.get("originalPath", "")
 
-        if dry_run:
-            try:
-                file_hash = hasher.calculate_hash(host_path)
-                is_dup = hasher.is_duplicate(file_hash)
-            except Exception as exc:
-                logger.error("[%d/%d] Hash error for %s: %s", i, stats["total_assets"], host_path, exc)
+            # Skip already-synced unless forced
+            if not force_resync and asset_id in synced_files:
+                stats["skipped"] += 1
+                continue
+
+            # 4a. Map container path to host path
+            host_path = map_container_path(original_path, docker_mappings)
+            if host_path is None:
+                logger.warning(
+                    "[%d/%d] No path mapping for container path: %s",
+                    i, len(assets), original_path,
+                )
                 stats["errors"] += 1
                 continue
 
-            if is_dup:
-                stats["duplicates"] += 1
-                logger.info("[%d/%d] Would skip (duplicate): %s", i, stats["total_assets"], host_path)
-            else:
-                stats["new_files"] += 1
-                logger.info("[%d/%d] Would copy: %s -> user=%s", i, stats["total_assets"], host_path, user_name)
-        else:
-            try:
-                result = organizer.organize_file(host_path, user_name, exif_date=exif_date)
-            except Exception as exc:
-                logger.error("[%d/%d] Failed to organize %s: %s", i, stats["total_assets"], host_path, exc)
+            # 4b. Verify file exists on disk
+            if not host_path.exists():
+                logger.warning(
+                    "[%d/%d] File not found on disk: %s (mapped from %s)",
+                    i, len(assets), host_path, original_path,
+                )
                 stats["errors"] += 1
                 continue
 
-            if result["is_duplicate"]:
-                stats["duplicates"] += 1
-                logger.info("[%d/%d] Duplicate: %s (hash %s)", i, stats["total_assets"], host_path, result["hash"])
+            # 4c. Get user name
+            owner_id = asset.get("ownerId", "unknown")
+            user_name = get_user_name(owner_id)
+
+            # 4d. Organize file
+            exif_date = asset.get("fileCreatedAt")
+
+            if dry_run:
+                try:
+                    file_hash = hasher.calculate_hash(host_path)
+                    is_dup = hasher.is_duplicate(file_hash)
+                except Exception as exc:
+                    logger.error("[%d/%d] Hash error for %s: %s", i, len(assets), host_path, exc)
+                    stats["errors"] += 1
+                    continue
+
+                if is_dup:
+                    stats["duplicates"] += 1
+                    logger.info("[%d/%d] Would skip (duplicate): %s", i, len(assets), host_path)
+                else:
+                    stats["new_files"] += 1
+                    logger.info("[%d/%d] Would copy: %s -> user=%s", i, len(assets), host_path, user_name)
             else:
-                stats["new_files"] += 1
-                logger.info("[%d/%d] Copied: %s -> %s", i, stats["total_assets"], host_path, result["target_path"])
+                try:
+                    result = organizer.organize_file(host_path, user_name, exif_date=exif_date)
+                except Exception as exc:
+                    logger.error("[%d/%d] Failed to organize %s: %s", i, len(assets), host_path, exc)
+                    stats["errors"] += 1
+                    continue
 
-            # 4e. Collect for archiving
-            ids_to_archive.append(asset_id)
+                if result["is_duplicate"]:
+                    stats["duplicates"] += 1
+                    logger.info("[%d/%d] Duplicate: %s (hash %s)", i, len(assets), host_path, result["hash"])
+                else:
+                    stats["new_files"] += 1
+                    logger.info("[%d/%d] Copied: %s -> %s", i, len(assets), host_path, result["target_path"])
 
-            synced_files[asset_id] = {
-                "original_path": original_path,
-                "target_path": str(result["target_path"]),
-                "sync_time": datetime.now().isoformat(),
-            }
+                # 4e. Collect for archiving
+                ids_to_archive.append(asset_id)
 
-    # 5. Archive via API
-    archive_stats = {"total": 0, "archived": 0, "errors": 0}
-    if ids_to_archive and not dry_run:
-        logger.info("Archiving %d assets in Immich...", len(ids_to_archive))
-        archive_stats = archiver.archive_assets(ids_to_archive)
-        stats["errors"] += archive_stats["errors"]
+                synced_files[asset_id] = {
+                    "original_path": original_path,
+                    "target_path": str(result["target_path"]),
+                    "sync_time": datetime.now().isoformat(),
+                }
+
+        # 5. Archive this user's assets using their own API key
+        if ids_to_archive and not dry_run:
+            logger.info("Archiving %d assets in Immich...", len(ids_to_archive))
+            archive_stats = archiver.archive_assets(ids_to_archive)
+            stats["errors"] += archive_stats["errors"]
+            stats["archived"] += archive_stats["archived"]
 
     # 6. Save state
     if not dry_run:
@@ -249,8 +267,8 @@ def cmd_sync(config: Config, dry_run: bool = False, force_resync: bool = False, 
     logger.info("Duplicates:    %d", stats["duplicates"])
     logger.info("Skipped:       %d", stats["skipped"])
     logger.info("Errors:        %d", stats["errors"])
-    if ids_to_archive and not dry_run:
-        logger.info("Archived:      %d", archive_stats["archived"])
+    if stats["archived"] and not dry_run:
+        logger.info("Archived:      %d", stats["archived"])
     if dry_run:
         logger.info("(dry run - no changes made)")
 
@@ -273,15 +291,22 @@ def cmd_status(config: Config, state_file: Path = None) -> bool:
     logger.info("Last sync:        %s", last_sync if last_sync else "Never")
     logger.info("Total synced:     %d", state.get("total_synced", 0))
 
-    # Unarchived count from API
+    # Unarchived count from API (sum across all configured users)
+    api_keys: list[str] = config.get("immich.api_keys") or []
+    if not api_keys:
+        single_key = config.get("immich.api_key")
+        if single_key:
+            api_keys = [single_key]
     try:
-        api = ImmichAPI(
-            base_url=config.get("immich.api_url"),
-            api_key=config.get("immich.api_key"),
-        )
-        if api.ping():
-            assets = api.get_all_unarchived_assets()
-            logger.info("Unarchived assets: %d", len(assets))
+        total_unarchived = 0
+        reachable = False
+        for api_key in api_keys:
+            api = ImmichAPI(base_url=config.get("immich.api_url"), api_key=api_key)
+            if api.ping():
+                reachable = True
+                total_unarchived += len(api.get_all_unarchived_assets())
+        if reachable:
+            logger.info("Unarchived assets: %d (across %d user(s))", total_unarchived, len(api_keys))
         else:
             logger.info("Unarchived assets: (server unreachable)")
     except Exception as exc:

@@ -2,18 +2,21 @@
 # sandbox/sandbox.sh — helper for the photo_server sandbox environment
 #
 # Commands:
-#   start     bring up sandbox Docker Compose stack and wait for Immich to be ready
-#   stop      bring down (preserves data)
-#   reset     stop + wipe all sandbox data (fresh slate)
-#   logs      tail sandbox server logs
-#   status    show running containers, last sync state, and API key status
-#   get-key   create admin user + API key, save to .sandbox_api_key, print it
-#   run       run immich_backup.py with sandbox config + state file
-#             Usage: ./sandbox.sh run [sync|status|organize] [extra args...]
+#   start            bring up sandbox Docker Compose stack and wait for Immich to be ready
+#   stop             bring down (preserves data)
+#   reset            stop + wipe all sandbox data (fresh slate)
+#   logs             tail sandbox server logs
+#   status           show running containers, last sync state, and API key status
+#   get-key          create admin user + API key, save to .sandbox_api_key, print it
+#   add-user-key     create an API key for a non-admin user and add it to the sync pool
+#                    Usage: ./sandbox.sh add-user-key <email> <password>
+#   run              run immich_backup.py with sandbox config + state file
+#                    Usage: ./sandbox.sh run [sync|status|organize] [extra args...]
 #
 # Examples:
 #   ./sandbox.sh start
 #   ./sandbox.sh get-key
+#   ./sandbox.sh add-user-key isael@sandbox.local password123
 #   ./sandbox.sh run status
 #   ./sandbox.sh run sync --dry-run
 #   ./sandbox.sh run sync
@@ -30,6 +33,7 @@ CONFIG_FILE="${SCRIPT_DIR}/config.sandbox.json"
 CONFIG_EXAMPLE="${SCRIPT_DIR}/config.sandbox.json.example"
 STATE_FILE="${SCRIPT_DIR}/sync_state.sandbox.json"
 API_KEY_FILE="${SCRIPT_DIR}/.sandbox_api_key"
+USER_KEYS_FILE="${SCRIPT_DIR}/.sandbox_user_keys"
 
 # Ensure .env.sandbox exists (copy from example if not)
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -124,6 +128,7 @@ cmd_reset() {
     rm -f \
         "${SCRIPT_DIR}/sync_state.sandbox.json" \
         "${SCRIPT_DIR}/.sandbox_api_key" \
+        "${SCRIPT_DIR}/.sandbox_user_keys" \
         "${SCRIPT_DIR}/config.sandbox.json"
     echo "Sandbox reset complete. Run './sandbox.sh start' to begin fresh."
 }
@@ -158,12 +163,18 @@ print('  Total synced:', state.get('total_synced', 0))
         echo "  No state file yet (run sync first)."
     fi
     echo ""
-    echo "=== API Key ==="
+    echo "=== API Keys ==="
     if [[ -f "${API_KEY_FILE}" ]]; then
-        echo "  Saved in ${API_KEY_FILE}"
-        echo "  Key: $(cat "${API_KEY_FILE}")"
+        echo "  Admin key: $(cat "${API_KEY_FILE}")"
     else
-        echo "  Not set. Run './sandbox.sh get-key' first."
+        echo "  Admin key: not set. Run './sandbox.sh get-key' first."
+    fi
+    if [[ -f "${USER_KEYS_FILE}" ]]; then
+        local count
+        count=$(python3 -c "import json; print(len(json.load(open('${USER_KEYS_FILE}'))))")
+        echo "  User keys: ${count} stored in ${USER_KEYS_FILE}"
+    else
+        echo "  User keys: none (use './sandbox.sh add-user-key <email> <password>' to add)"
     fi
 }
 
@@ -211,6 +222,44 @@ cmd_get_key() {
     echo "You can now run: ./sandbox.sh run status"
 }
 
+cmd_add_user_key() {
+    local email="${1:-}"
+    local password="${2:-}"
+    if [[ -z "${email}" || -z "${password}" ]]; then
+        echo "Usage: ./sandbox.sh add-user-key <email> <password>" >&2
+        exit 1
+    fi
+
+    echo "==> Creating API key for ${email}..."
+
+    local login_result
+    login_result=$(curl -sf -X POST \
+        "${SANDBOX_BASE_URL}/api/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"email\":\"${email}\",\"password\":\"${password}\"}")
+    local access_token
+    access_token=$(echo "${login_result}" | python3 -c "import json,sys; print(json.load(sys.stdin)['accessToken'])")
+
+    local key_result
+    key_result=$(curl -sf -X POST \
+        "${SANDBOX_BASE_URL}/api/api-keys" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${access_token}" \
+        -d '{"name":"sandbox-key","permissions":["all"]}')
+    local api_key
+    api_key=$(echo "${key_result}" | python3 -c "import json,sys; print(json.load(sys.stdin)['secret'])")
+
+    python3 -c "
+import json, os
+f = '${USER_KEYS_FILE}'
+keys = json.load(open(f)) if os.path.exists(f) else []
+if '${api_key}' not in keys:
+    keys.append('${api_key}')
+json.dump(keys, open(f, 'w'), indent=2)
+"
+    echo "API key for ${email} added to ${USER_KEYS_FILE}"
+}
+
 cmd_run() {
     _ensure_config
     if [[ ! -f "${API_KEY_FILE}" ]]; then
@@ -220,16 +269,21 @@ cmd_run() {
     local api_key
     api_key=$(cat "${API_KEY_FILE}")
 
-    # Build a temporary config with the real API key injected
+    # Build a temporary config with api_keys array injected (admin key + any user keys)
     local tmp_config
     tmp_config=$(mktemp /tmp/config.sandbox.XXXXXX.json)
     # shellcheck disable=SC2064
     trap "rm -f '${tmp_config}'" EXIT
 
     python3 -c "
-import json
+import json, os
 cfg = json.load(open('${CONFIG_FILE}'))
-cfg['immich']['api_key'] = '${api_key}'
+keys = ['${api_key}']
+user_keys_file = '${USER_KEYS_FILE}'
+if os.path.exists(user_keys_file):
+    keys.extend(json.load(open(user_keys_file)))
+cfg['immich'].pop('api_key', None)
+cfg['immich']['api_keys'] = keys
 json.dump(cfg, open('${tmp_config}', 'w'), indent=2)
 "
 
@@ -244,17 +298,18 @@ json.dump(cfg, open('${tmp_config}', 'w'), indent=2)
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
-    start)     cmd_start ;;
-    stop)      cmd_stop ;;
-    reset)     cmd_reset ;;
-    logs)      cmd_logs ;;
-    status)    cmd_status ;;
-    get-key)   cmd_get_key ;;
-    run)       shift; cmd_run "$@" ;;
-    ls-upload) cmd_ls_upload ;;
-    ls-nas)    cmd_ls_nas ;;
+    start)        cmd_start ;;
+    stop)         cmd_stop ;;
+    reset)        cmd_reset ;;
+    logs)         cmd_logs ;;
+    status)       cmd_status ;;
+    get-key)      cmd_get_key ;;
+    add-user-key) shift; cmd_add_user_key "$@" ;;
+    run)          shift; cmd_run "$@" ;;
+    ls-upload)    cmd_ls_upload ;;
+    ls-nas)       cmd_ls_nas ;;
     *)
-        echo "Usage: sandbox.sh {start|stop|reset|logs|status|get-key|run|ls-upload|ls-nas} [args...]"
+        echo "Usage: sandbox.sh {start|stop|reset|logs|status|get-key|add-user-key|run|ls-upload|ls-nas} [args...]"
         exit 1
         ;;
 esac

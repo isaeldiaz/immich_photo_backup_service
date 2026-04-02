@@ -19,6 +19,7 @@ sandbox/pgdata/
 sandbox/logs/
 sandbox/sync_state.sandbox.json
 sandbox/.sandbox_api_key
+sandbox/.sandbox_user_keys
 sandbox/.env.sandbox
 sandbox/config.sandbox.json
 
