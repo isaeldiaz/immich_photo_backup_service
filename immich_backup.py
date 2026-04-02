@@ -431,6 +431,58 @@ def cmd_organize(
     return stats["errors"] == 0
 
 
+def cmd_scan_library(
+    config: Config,
+    library_id: str | None = None,
+    refresh_modified: bool = False,
+    refresh_all: bool = False,
+) -> bool:
+    """Trigger a rescan of one or all external libraries in Immich."""
+    logger = get_logger("immich_backup")
+
+    api_keys: list[str] = config.get("immich.api_keys") or []
+    if not api_keys:
+        single_key = config.get("immich.api_key")
+        if single_key:
+            api_keys = [single_key]
+    if not api_keys:
+        logger.error("No API keys configured.")
+        return False
+
+    api = ImmichAPI(base_url=config.get("immich.api_url"), api_key=api_keys[0])
+
+    if not api.ping():
+        logger.error("Cannot reach Immich server at %s", config.get("immich.api_url"))
+        return False
+
+    libraries = api.list_libraries()
+    if not libraries:
+        logger.info("No libraries found.")
+        return True
+
+    targets = [lib for lib in libraries if library_id is None or lib["id"] == library_id]
+    if not targets:
+        logger.error("Library not found: %s", library_id)
+        logger.info("Available libraries:")
+        for lib in libraries:
+            logger.info("  %s  %s", lib["id"], lib.get("name", "(unnamed)"))
+        return False
+
+    success = True
+    for lib in targets:
+        lid = lib["id"]
+        name = lib.get("name", lid)
+        logger.info("Scanning library: %s (%s)", name, lid)
+        try:
+            api.scan_library(lid, refresh_modified_files=refresh_modified, refresh_all_files=refresh_all)
+            logger.info("Scan triggered for: %s", name)
+        except Exception as exc:
+            logger.error("Failed to trigger scan for %s: %s", name, exc)
+            success = False
+
+    return success
+
+
 # ------------------------------------------------------------------
 # CLI
 # ------------------------------------------------------------------
@@ -454,6 +506,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # status
     subparsers.add_parser("status", help="Show config, last sync time, and statistics")
+
+    # scan-library
+    scan_parser = subparsers.add_parser("scan-library", help="Trigger an Immich external library rescan")
+    scan_parser.add_argument("--library-id", default=None, metavar="ID",
+        help="Library ID to scan (default: scan all libraries)")
+    scan_parser.add_argument("--refresh-modified", action="store_true",
+        help="Re-import files whose modification time changed")
+    scan_parser.add_argument("--refresh-all", action="store_true",
+        help="Force re-import of every file in the library")
 
     # organize
     organize_parser = subparsers.add_parser("organize", help="Rename existing NAS files with hash suffixes")
@@ -498,6 +559,13 @@ def main() -> int:
         if args.command == "sync":
             force_resync = getattr(args, "force_resync", False)
             success = cmd_sync(config, dry_run=dry_run, force_resync=force_resync, state_file=state_file)
+        elif args.command == "scan-library":
+            success = cmd_scan_library(
+                config,
+                library_id=getattr(args, "library_id", None),
+                refresh_modified=getattr(args, "refresh_modified", False),
+                refresh_all=getattr(args, "refresh_all", False),
+            )
         elif args.command == "status":
             success = cmd_status(config, state_file=state_file)
         elif args.command == "organize":

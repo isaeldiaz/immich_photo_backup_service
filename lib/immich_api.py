@@ -168,6 +168,26 @@ class ImmichAPI:
         return True
 
     # ------------------------------------------------------------------
+    # Libraries
+    # ------------------------------------------------------------------
+
+    def list_libraries(self) -> list[dict]:
+        """Return all libraries visible to this API key."""
+        return self._get("/api/libraries").json()
+
+    def scan_library(self, library_id: str, refresh_modified_files: bool = False, refresh_all_files: bool = False) -> None:
+        """Trigger a rescan of an external library.
+
+        ``refresh_modified_files`` re-imports files whose mtime changed.
+        ``refresh_all_files`` forces a full re-import of every file.
+        """
+        payload = {
+            "refreshModifiedFiles": refresh_modified_files,
+            "refreshAllFiles": refresh_all_files,
+        }
+        self._post(f"/api/libraries/{library_id}/scan", json=payload)
+
+    # ------------------------------------------------------------------
     # Upload (for test setup)
     # ------------------------------------------------------------------
 
