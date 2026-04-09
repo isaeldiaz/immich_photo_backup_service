@@ -26,13 +26,52 @@ CLIP_MODEL=""
 FACE_MODEL=""
 CLEAN=false
 
+usage() {
+    cat <<EOF
+Usage: sudo $(basename "$0") [OPTIONS]
+
+Download or refresh ML models for the immich_machine_learning container.
+
+By default, model names are read from the running Immich system config via the
+API. Use --clip / --face to override (required when Immich is not yet running).
+
+OPTIONS:
+  --clip <model>   CLIP model name (default: read from Immich API, fallback: ViT-B-32__openai)
+  --face <model>   Facial recognition model name (default: read from Immich API, fallback: buffalo_l)
+  --clean          Remove all cached models before downloading (use when models
+                   are in the wrong directory layout, e.g. after an image upgrade)
+  --help           Show this help message and exit
+
+EXAMPLES:
+  # Normal refresh — reads model names from running Immich instance:
+  sudo $(basename "$0")
+
+  # After upgrading the Immich image (cache layout may have changed):
+  sudo $(basename "$0") --clean
+
+  # Specify models explicitly (e.g. before first start or when API is unreachable):
+  sudo $(basename "$0") --clip ViT-B-32__openai --face buffalo_l
+
+  # Full reset with explicit model names:
+  sudo $(basename "$0") --clean --clip ViT-B-32__openai --face buffalo_l
+
+NOTES:
+  - Requires the $ML_CONTAINER container to be running to detect the correct
+    cache directory layout. If it is not running, a flat layout fallback is used.
+  - Models are sourced from HuggingFace (huggingface.co); the host must have
+    internet access. The container itself does not need internet access.
+  - After downloading, the ML container is restarted automatically.
+EOF
+}
+
 # -- parse args --
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --clean)   CLEAN=true; shift ;;
         --clip)    CLIP_MODEL="$2"; shift 2 ;;
         --face)    FACE_MODEL="$2"; shift 2 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        --help)    usage; exit 0 ;;
+        *) echo "Unknown option: $1"; echo "Run '$(basename "$0") --help' for usage."; exit 1 ;;
     esac
 done
 
@@ -51,7 +90,7 @@ echo "Cache volume: $CACHE_DIR"
 fetch_model_config() {
     local api_key
     api_key=$(grep -o '"api_key"[[:space:]]*:[[:space:]]*"[^"]*"' \
-        "$(dirname "$COMPOSE_FILE")/config.json" | head -1 | grep -o '"[^"]*"$' | tr -d '"')
+        "$(dirname "$COMPOSE_FILE")/config.json" 2>/dev/null | head -1 | grep -o '"[^"]*"$' | tr -d '"' || true)
 
     if [[ -z "$api_key" ]]; then
         echo "WARN: Could not read API key from config.json — skipping live config fetch"
@@ -66,13 +105,15 @@ fetch_model_config() {
         return
     fi
 
-    [[ -z "$CLIP_MODEL" ]] && \
+    if [[ -z "$CLIP_MODEL" ]]; then
         CLIP_MODEL=$(echo "$response" | python3 -c \
             "import sys,json; print(json.load(sys.stdin)['machineLearning']['clip']['modelName'])" 2>/dev/null || true)
+    fi
 
-    [[ -z "$FACE_MODEL" ]] && \
+    if [[ -z "$FACE_MODEL" ]]; then
         FACE_MODEL=$(echo "$response" | python3 -c \
             "import sys,json; print(json.load(sys.stdin)['machineLearning']['facialRecognition']['modelName'])" 2>/dev/null || true)
+    fi
 }
 
 fetch_model_config
@@ -101,16 +142,17 @@ fi
 # -- resolve model cache subdirs from the running container --
 # The ML image uses subdirectories per model type (e.g. /cache/clip/<model>).
 # Query the container directly so this script stays correct across image upgrades.
+# NOTE: heredoc via stdin does not work inside $() subshells with docker exec;
+# use -c with a single quoted string to avoid the stdin/subshell issue.
 resolve_cache_subdirs() {
-    docker exec "$ML_CONTAINER" python3 - << PYEOF 2>/dev/null || true
+    docker exec "$ML_CONTAINER" python3 -c "
 from immich_ml.models.clip.visual import OpenClipVisualEncoder
 from immich_ml.models.facial_recognition.detection import FaceDetector
-import json, sys
-
-clip = OpenClipVisualEncoder("$CLIP_MODEL")
-face = FaceDetector("$FACE_MODEL")
-print(json.dumps({"clip": str(clip.cache_dir), "face": str(face.cache_dir)}))
-PYEOF
+import json
+clip = OpenClipVisualEncoder('$CLIP_MODEL')
+face = FaceDetector('$FACE_MODEL')
+print(json.dumps({'clip': str(clip.cache_dir), 'face': str(face.cache_dir)}))
+" 2>/dev/null || true
 }
 
 SUBDIR_JSON=$(resolve_cache_subdirs)
