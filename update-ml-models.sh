@@ -98,23 +98,58 @@ if ! python3 -c "from huggingface_hub import snapshot_download" 2>/dev/null; the
     pip install -q huggingface_hub
 fi
 
+# -- resolve model cache subdirs from the running container --
+# The ML image uses subdirectories per model type (e.g. /cache/clip/<model>).
+# Query the container directly so this script stays correct across image upgrades.
+resolve_cache_subdirs() {
+    docker exec "$ML_CONTAINER" python3 - << PYEOF 2>/dev/null || true
+from immich_ml.models.clip.visual import OpenClipVisualEncoder
+from immich_ml.models.facial_recognition.detection import FaceDetector
+import json, sys
+
+clip = OpenClipVisualEncoder("$CLIP_MODEL")
+face = FaceDetector("$FACE_MODEL")
+print(json.dumps({"clip": str(clip.cache_dir), "face": str(face.cache_dir)}))
+PYEOF
+}
+
+SUBDIR_JSON=$(resolve_cache_subdirs)
+
+if [[ -n "$SUBDIR_JSON" ]]; then
+    CLIP_CACHE=$(echo "$SUBDIR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['clip'])")
+    FACE_CACHE=$(echo "$SUBDIR_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['face'])")
+    # Translate container paths to host paths via the volume mount
+    CLIP_CACHE_HOST="${CACHE_DIR}${CLIP_CACHE#/cache}"
+    FACE_CACHE_HOST="${CACHE_DIR}${FACE_CACHE#/cache}"
+else
+    # Fallback: flat layout (older image versions)
+    CLIP_CACHE_HOST="$CACHE_DIR"
+    FACE_CACHE_HOST="$CACHE_DIR"
+fi
+
+echo "CLIP cache path:        $CLIP_CACHE_HOST"
+echo "Face cache path:        $FACE_CACHE_HOST"
+
 # -- download --
 echo ""
-echo "Downloading models into $CACHE_DIR ..."
+echo "Downloading models..."
 
 python3 - << EOF
 from huggingface_hub import snapshot_download
-import os
+from pathlib import Path
 
-cache = "$CACHE_DIR"
-models = ["immich-app/$CLIP_MODEL", "immich-app/$FACE_MODEL"]
+downloads = [
+    ("immich-app/$CLIP_MODEL", "$CLIP_CACHE_HOST"),
+    ("immich-app/$FACE_MODEL", "$FACE_CACHE_HOST"),
+]
 
-for repo in models:
-    print(f"  -> {repo}")
+for repo, local_dir in downloads:
+    Path(local_dir).mkdir(parents=True, exist_ok=True)
+    print(f"  -> {repo} into {local_dir}")
     snapshot_download(
         repo,
-        cache_dir=cache,
-        local_dir=cache,
+        cache_dir=local_dir,
+        local_dir=local_dir,
         ignore_patterns=["*.armnn", "*.rknn"],
     )
     print(f"     done.")
